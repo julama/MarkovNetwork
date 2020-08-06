@@ -20,12 +20,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 """
 
-from __future__ import print_function
 import numpy as np
 
 
-class MarkovNetwork(object):
+# from numba import jit
 
+
+class MarkovNetwork(object):
     """A Markov Network for neural computing."""
 
     max_markov_gate_inputs = 4
@@ -71,6 +72,7 @@ class MarkovNetwork(object):
         self.markov_gates = []
         self.markov_gate_input_ids = []
         self.markov_gate_output_ids = []
+        self.input_output_ids = []
 
         if genome is None:
             self.genome = np.random.randint(0, 256, random_genome_length).astype(np.uint8)
@@ -82,6 +84,8 @@ class MarkovNetwork(object):
                 self.genome[start_index + 1] = 213
         else:
             self.genome = np.array(genome, dtype=np.uint8)
+
+        # print((self.genome.dtype))
 
         self._setup_markov_network(probabilistic)
 
@@ -98,49 +102,122 @@ class MarkovNetwork(object):
         None
 
         """
+
+        def circ_index(internal_index_counter):
+            return internal_index_counter % (self.genome.shape[0])
+
         for index_counter in range(self.genome.shape[0] - 1):
-            # Sequence of 42 then 213 indicates a new Markov Gate
-            if self.genome[index_counter] == 42 and self.genome[index_counter + 1] == 213:
+            # Sequence of 42 - 213 or 42 - 214 indicates a new Markov Gate
+            if self.genome[index_counter] == 42 and (
+                    self.genome[index_counter + 1] == 213 or self.genome[index_counter + 1] == 214):
+                if self.genome[index_counter + 1] == 214:
+                    decomp = True
+                    # print('decomp')
+                else:
+                    decomp = False
+                    # print('interneuron')
+
+                probabilistic = True
+                # print('probab')
                 internal_index_counter = index_counter + 2
 
                 # Determine the number of inputs and outputs for the Markov Gate
-                num_inputs = (self.genome[internal_index_counter] % MarkovNetwork.max_markov_gate_inputs) + 1
+                num_inputs = (self.genome[
+                                  circ_index(internal_index_counter)] % MarkovNetwork.max_markov_gate_inputs) + 1
                 internal_index_counter += 1
-                num_outputs = (self.genome[internal_index_counter] % MarkovNetwork.max_markov_gate_outputs) + 1
+                num_outputs = (self.genome[
+                                   circ_index(internal_index_counter)] % MarkovNetwork.max_markov_gate_outputs) + 1
                 internal_index_counter += 1
 
                 # Make sure that the genome is long enough to encode this Markov Gate
                 if (internal_index_counter +
-                        (MarkovNetwork.max_markov_gate_inputs + MarkovNetwork.max_markov_gate_outputs) +
-                        (2 ** num_inputs) * (2 ** num_outputs)) > self.genome.shape[0]:
+                    (MarkovNetwork.max_markov_gate_inputs + MarkovNetwork.max_markov_gate_outputs) +
+                    (2 ** num_inputs) * (num_outputs)) > self.genome.shape[0]:
                     continue
 
                 # Determine the states that the Markov Gate will connect its inputs and outputs to
-                input_state_ids = self.genome[internal_index_counter:internal_index_counter + MarkovNetwork.max_markov_gate_inputs][:num_inputs]
-                input_state_ids = np.mod(input_state_ids, self.states.shape[0])
+                input_state_ids = self.genome[
+                                  internal_index_counter:internal_index_counter + MarkovNetwork.max_markov_gate_inputs][
+                                  :num_inputs]
+
+                if decomp:
+                    input_state_ids = np.mod(input_state_ids, self.states.shape[0])
+                # Interneuron
+                else:
+                    input_state_ids = np.mod(input_state_ids, self.num_memory_states) + self.num_input_states
                 internal_index_counter += MarkovNetwork.max_markov_gate_inputs
 
-                output_state_ids = self.genome[internal_index_counter:internal_index_counter + MarkovNetwork.max_markov_gate_outputs][:num_outputs]
-                output_state_ids = np.mod(output_state_ids, self.states.shape[0])
-                internal_index_counter += MarkovNetwork.max_markov_gate_outputs
+                output_state_ids = self.genome[
+                                   internal_index_counter:internal_index_counter + MarkovNetwork.max_markov_gate_outputs][
+                                   :num_outputs]
 
+                # Disallow gates from writing into input
+                if decomp:
+                    output_state_ids = np.mod(output_state_ids, self.states.shape[0] - self.num_input_states)
+                # Interneuron
+                else:
+                    output_state_ids = np.mod(output_state_ids, self.num_memory_states)
+                output_state_ids += self.num_input_states
+                #
+
+                internal_index_counter += MarkovNetwork.max_markov_gate_outputs
                 self.markov_gate_input_ids.append(input_state_ids)
                 self.markov_gate_output_ids.append(output_state_ids)
 
                 # Interpret the probability table for the Markov Gate
-                markov_gate = np.copy(self.genome[internal_index_counter:internal_index_counter + (2 ** num_inputs) * (2 ** num_outputs)])
-                markov_gate = markov_gate.reshape((2 ** num_inputs, 2 ** num_outputs))
+                markov_gate = np.copy(
+                    self.genome[internal_index_counter:internal_index_counter + (2 ** num_inputs) * (num_outputs)])
+                markov_gate = markov_gate.reshape((2 ** num_inputs, num_outputs))
 
                 if probabilistic:  # Probabilistic Markov Gates
-                    markov_gate = markov_gate.astype(np.float64) / np.sum(markov_gate, axis=1, dtype=np.float64)[:, None]
+                    # print('prob')
+                    # markov_gate = markov_gate.astype(np.float64) / np.sum(markov_gate, axis=1, dtype=np.float64)[:, None]
+                    markov_gate = markov_gate.astype(np.float64) / 255
+                    joint_prob = np.zeros((2 ** num_inputs, 2 ** num_outputs))
+                    index = 0
+                    for x in markov_gate:
+                        # print(x)
+                        x = np.concatenate((1 - x, x), axis=0).reshape((2, num_outputs))
+                        # print(x)
+                        bitstring = ([np.array(list(np.binary_repr(i, width=num_outputs)), dtype=np.uint8) for i in
+                                      range(2 ** num_outputs)])
+                        joint_prob[index] = [np.prod([x[i[out], out] for out in range(num_outputs)]) for i in bitstring]
+                        index += 1
+
+                    markov_gate = joint_prob
+                    # print(np.round_(markov_gate, decimals=2))
                     # Precompute the cumulative sums for the activation function
                     markov_gate = np.cumsum(markov_gate, axis=1, dtype=np.float64)
+                    # print(markov_gate)
+
+
+                # if feedback:
+
                 else:  # Deterministic Markov Gates
+                    # print('det')
                     row_max_indices = np.argmax(markov_gate, axis=1)
                     markov_gate[:, :] = 0
                     markov_gate[np.arange(len(row_max_indices)), row_max_indices] = 1
-
+                # print(input_state_ids, 'in')
+                # print(output_state_ids)
+                self.input_output_ids.append(input_state_ids)
+                self.input_output_ids.append(output_state_ids)
                 self.markov_gates.append(markov_gate)
+
+    def input_output(self):
+        try:
+            inouts = np.concatenate(self.input_output_ids, axis=0)
+        except:
+            return False
+        ins = range(self.num_input_states)
+        outs = range(self.num_input_states + self.num_memory_states,
+                     self.num_input_states + self.num_memory_states + self.num_output_states)
+        # vals = np.concatenate((ins, outs), axis=0)
+        if np.any(np.in1d(ins, inouts)) and np.any(np.in1d(outs, inouts)):
+            return True
+        else:
+            False
+
 
     def activate_network(self, num_activations=1):
         """Activates the Markov Network
@@ -155,44 +232,29 @@ class MarkovNetwork(object):
         None
 
         """
-        # Save original input values
+        # vfunc = np.vectorize(self.activate)
+
+        # print((np.array((self.markov_gates, self.markov_gate_input_ids, self.markov_gate_output_ids)).T)[1])
+        # vfunc((np.array((self.markov_gates, self.markov_gate_input_ids, self.markov_gate_output_ids)).T))
         original_input_values = np.copy(self.states[:self.num_input_states])
         for _ in range(num_activations):
-            # NOTE: This routine can be refactored to use NumPy if larger MNs are being used
-            # See implementation at https://github.com/rhiever/MarkovNetwork/blob/a381aa9919bb6898b56f678e08127ba6e0eef98f/MarkovNetwork/MarkovNetwork.py#L162:L169
+            # vfunc((np.array((self.markov_gates, self.markov_gate_input_ids, self.markov_gate_output_ids)).T))
             for markov_gate, mg_input_ids, mg_output_ids in zip(self.markov_gates, self.markov_gate_input_ids,
                                                                 self.markov_gate_output_ids):
-
-                mg_input_index, marker = 0, 1
-                # Create an integer from bytes representation (loop is faster than previous implementation)
-                for mg_input_id in reversed(mg_input_ids):
-                    if self.states[mg_input_id]:
-                        mg_input_index += marker
-                    marker *= 2
+                # Determine the input values for this Markov Gate
+                mg_input_values = self.states[mg_input_ids]
+                mg_input_index = int(''.join([str(int(val)) for val in mg_input_values]), base=2)
 
                 # Determine the corresponding output values for this Markov Gate
-                roll = np.random.uniform()  # sets a roll value
-                markov_gate_subarray = markov_gate[mg_input_index]  # selects a Markov Gate subarray
+                roll = np.random.uniform()
+                mg_output_index = np.where(markov_gate[mg_input_index, :] >= roll)[0][0]
+                mg_output_values = np.array(list(np.binary_repr(mg_output_index, width=len(mg_output_ids))),
+                                            dtype=np.uint8)
+                self.states[mg_output_ids] = np.bitwise_or(self.states[mg_output_ids], mg_output_values)
 
-                # Searches for the first value where markov_gate > roll
-                for i, markov_gate_element in enumerate(markov_gate_subarray):
-                    if markov_gate_element >= roll:
-                        mg_output_index = i
-                        break
-
-                # Converts the index into a string of '1's and '0's (binary representation)
-                mg_output_values = bin(mg_output_index)  # bin() is much faster than np.binaryrepr()
-
-                # diff_len deals with the lack of the width argument there was on np.binaryrepr()
-                diff_len = mg_output_ids.shape[0] - (len(mg_output_values) - 2)
-
-                # Loops through 'mg_output_values' and alter 'self.states'
-                for i, mg_output_value in enumerate(mg_output_values[2:]):
-                    if mg_output_value == '1':
-                        self.states[mg_output_ids[i + diff_len]] = True
-
-            # Replace original input values
             self.states[:self.num_input_states] = original_input_values
+
+            # print(self.states[8:])
 
     def update_input_states(self, input_values):
         """Updates the input states with the provided inputs
@@ -208,10 +270,28 @@ class MarkovNetwork(object):
         None
 
         """
+
+        # """ Reset brain output- CUSTOM """
+        #  """" reset output """
+        # self.states[-self.num_output_states:] = False
+        #  #print (self.states)
+        #  """" reset whole brain """
+        # self.states[self.num_input_states:] = False
+        #  """ Reset brain """
+
         if len(input_values) != self.num_input_states:
             raise ValueError('Invalid number of input values provided')
 
         self.states[:self.num_input_states] = input_values
+
+    def reset_memory(self, out_only=True):
+        """ Reset brain output- CUSTOM """
+        """" reset output """
+        if out_only == True:
+            self.states[-self.num_output_states:] = False
+        else:
+            self.states[self.num_input_states:] = False
+        # print (self.states)
 
     def get_output_states(self):
         """Returns an array of the current output state's values
@@ -226,4 +306,4 @@ class MarkovNetwork(object):
             An array of the current output state's values
 
         """
-        return np.array(self.states[-self.num_output_states:])
+        return self.states[-self.num_output_states:]
